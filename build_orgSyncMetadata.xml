@@ -1,0 +1,294 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- ################################################################################################### 
+ @author   Persistent Systems 
+ @date     3-28-2017
+ @description  - This file contain all the tasks/targets needed for the supported salesforce metadata 
+				 migration to the target org. It has the logic to get the salesforce session id of the
+				 target org, response parsing, builddetails object record creation, runquery, incremental
+				 deployment, full deployment etc.
+				 
+				 Any metadata related changes needed need to be carried out in this file.
+				  
+#########################################################################################################
+-->
+
+<project name="Tasks for metadata migration" basedir="." xmlns:sf="antlib:com.salesforce">
+    
+    <!-- <property file="../build.properties"/> -->
+   <!-- <property file="default.properties"/> -->
+    <!-- <property  file="${property.file.path}"/> -->
+	<property environment="env"/>
+    
+  
+    <!-- Define salesforce migration tool task  -->
+    <taskdef resource="com/salesforce/antlib.xml" uri="antlib:com.salesforce">
+        <classpath>
+            <pathelement location="CISupport/lib/ant-salesforce.jar" />
+        </classpath>
+    </taskdef>
+
+	<taskdef resource="net/sf/antcontrib/antlib.xml" 
+              classpath="CISupport/lib/ant-contrib-1.0b3.jar"/>
+    
+    <!-- Define ant contib task to have complex logic like if else and for loop etc. -->
+    <taskdef resource="net/sf/antcontrib/antlib.xml" 
+              classpath="${ant.contrib.jar}" />
+	
+    <path id="Encodebase64.path">
+        <pathelement location="${ant.java.commons-codec.jar}"/>
+        <pathelement location="${ant.git.salesforce.incremental.jar}"/>
+    </path>
+    <!-- Define ant http task to make http get and post to salesforce for data -->  
+	<taskdef name="http" 
+             classname="org.missinglink.ant.task.http.HttpClientTask" classpath="${ant.http.jar}"/> 
+    
+    
+    <!-- Define xmltask to parse xml and add node to xml etc. -->
+    <taskdef name="xmltask" 
+             classname="com.oopsconsultancy.xmltask.ant.XmlTask" classpath="${ant.xmltask.jar}"/>
+    
+    
+    <!-- Define custom EncodeBase64 task to convert zip back up to base64 so that it can be post to SF -->
+    <taskdef name="EncodeBased64" classpathref="Encodebase64.path"
+             classname="EncodeBased64Binary"  />
+
+  	<target name="ORG_SYNC">
+
+		<!-- 1. Connect to your Org -->
+		<connectToOrg/>
+
+		<!-- git config - -local core.autocrlf false -->
+		<exec executable="git">
+			<arg line=" config --local core.autocrlf true "></arg>
+		</exec>
+		
+		<exec executable="git ">
+			<arg line=" pull -v --progress ${env.GIT_BRANCH}"></arg>
+		</exec>
+
+		<!-- 2. Retrieve supported metadata types of Org -->
+		<!-- 3. Retrieve componen	ts for each component type -->
+		<getSupportedMetadata/>
+
+		<!-- 4. Push your changes to git repository -->
+		
+		<checkInToGit/>
+
+	</target>		 
+   
+	<macrodef name="connectToOrg" description="Authorizes a Salesforce org using the JWT flow">
+		<sequential>
+			<echo message="1. Connect to your Org"/>
+			 <exec executable="JWTAuth.bat" resultproperty="SFDX.deploy.Result" outputproperty="SFDX.deploy.Result1" failonerror="true"> 
+			<!--	<exec executable="cmd" 
+					resultproperty="SFDX.deploy.Result" 
+					outputproperty="SFDX.deploy.Result1" 
+					failonerror="true">
+				<arg line="/c sfdx force:auth:jwt:grant -u ${sfsb.username} -f ${jwtKeyFile} -i ${clientId} -r ${sfsb.instanceurl} - -json - -loglevel TRACE "/> -->
+		   </exec>
+		   <echo>----------------------</echo>
+		   <echo>Auth Result : ${SFDX.deploy.Result1}</echo>
+		   <echo>----------------------</echo>
+		</sequential>
+	</macrodef>
+
+	<macrodef name="getSupportedMetadata" description="Get the list of supported metadata">
+		
+		<sequential>
+			<echo>2. Retrieve metadata types of your Org</echo>
+			<!--sfdx force:source:retrieve -p force-app/main/default  -->
+			<echo>Checking if there is any predefined Metadata list is configured or not </echo>
+			<trycatch>
+				<try>
+					<loadfile property="supportedMetadataList" srcFile="./CISupport/Sandbox/OrgMetadataBackup.txt" />
+				</try>
+				<catch>
+					<echo>${line.separator} *** FIle did not load it is empty ***</echo>
+				</catch>
+			</trycatch>
+			<getfilelength inputtext="${supportedMetadataList}" property="filelength"/>
+			<if>
+				<equals arg1="${filelength}" arg2="0"/>
+				<then>
+					<echo>*** No Metadata list is configured ***</echo>
+					<echo>2. Retrieve metadata types of your Org</echo>
+					<!--sfdx force:source:retrieve -p force-app/main/default  -->
+					<exec executable="cmd" 
+					resultproperty="SFDX.describemetadata.Result" 
+					outputproperty="SFDX.supportedMetadata" 
+					output="OrgMetadata.json"
+					failonerror="true">
+						<arg line="/c sfdx force:mdapi:describemetadata --json -u ${sfsb.username}"/>
+					</exec>
+					<getmetadatafromjson inputjosntext="${SFDX.supportedMetadata}" property="AllMetadataList"/>
+					<for list="${AllMetadataList}" param="metadataName" delimiter=",">
+						<sequential>
+							<echo>*** configured Metadata is @{metadataName} ***</echo>
+							<downloadMeata metadataname="@{metadataName}"/> 
+						</sequential>
+					</for>
+				</then>
+				<else>
+					<for list="${supportedMetadataList}" param="metadata" delimiter="${line.separator}">
+						<sequential>
+							<echo>*** configured Metadata is @{metadata} ***</echo>
+							<downloadMeata metadataname="@{metadata}"/> 
+						</sequential>
+					</for>
+				</else>
+			</if>
+		</sequential>
+	</macrodef>
+
+	<macrodef name="downloadMeata" description="download specific metadata">
+	<attribute name="metadataname" description="File List collection"/>
+		<sequential>
+			<echo>downloading metadata @{metadataname}</echo>
+			<trycatch>
+				<try>
+					<echo>---------------------------</echo>
+					<exec executable="cmd" 
+						resultproperty="SFDX.metadatdownload.Result" 
+						outputproperty="SFDX.metadatdownload.output" 
+						failonerror="true">
+						<arg line="/c sfdx force:source:retrieve -m @{metadataname} -u ${sfsb.username} --verbose "/>
+					</exec>
+					<echo>---------------------------</echo>
+				</try>
+				<catch>
+					<echo>${line.separator} *** Unsupported Metadata Type: @{metadata} ***</echo>
+				</catch>
+			</trycatch>
+		</sequential>
+	</macrodef>
+
+	<macrodef name="checkInToGit" description="Checkin to Git all list of supported metadata">
+		<sequential>
+			<var name="branchName" value=""/>
+			<replacoriginestring text="${env.GIT_BRANCH}" property="replaceText" />
+
+			<echo>Moving to force-app\main\default directory </echo>
+			<exec executable="git ">
+				<arg line=" pull -v --progress 'origin'"></arg>
+			</exec>
+			<echo>-----------------------------------------------------</echo>
+			<echo>executing following Git Command </echo>
+			<echo>$ git add --all</echo>
+			<echo>$ git status</echo>
+			<echo>git commit -m 'commit of all files FROM the Org to the repository' </echo>
+			<echo>-----------------------------------------------------</echo>
+			<!-- git config - -local core.autocrlf false -->
+			<exec executable="git">
+				<arg line=" git config - -local core.autocrlf true "></arg>
+			</exec>
+			<exec executable="git">
+				<arg line=" add --all"></arg>
+			</exec>
+			<exec executable="git">
+				<arg line=" status"></arg>
+			</exec>
+
+			<tstamp>
+				<format property="todayDate" pattern="dd-mmm-yyyy HH:mm:ss" locale="en"/>
+			</tstamp>
+
+			<exec executable="git">
+				<arg line=" commit -m 'commit of all files FROM the Org to the repository dated on ${todayDate}'"></arg>
+			</exec>
+			<exec executable="git">
+				<arg line=" push --progress origin HEAD:${replaceText}  --force "></arg>
+			</exec>
+
+		</sequential>
+	</macrodef>
+
+	<scriptdef name="substring" language="javascript">
+		<attribute name="text" />
+		<attribute name="start" />
+		<attribute name="end" />
+		<attribute name="property" />
+		<![CDATA[
+			var text = attributes.get("text");
+			var start = attributes.get("start") || 2;
+			var end = attributes.get("end") || text.length();
+			text = text.trim().replace(/\s+/, "");
+			text = text.trim().replace(":", "");
+			text = text.trim().replace(",", "");
+			text = text.replaceAll("^\"|\"$", "");
+			/*   project.setProperty(attributes.get("property"), text.substring(start, end));*/ 
+			project.setProperty(attributes.get("property"), text.substring(start, end));
+		]]>
+		</scriptdef>
+
+		<scriptdef name="replacoriginestring" language="javascript">
+		<attribute name="text" />
+		<attribute name="property" />
+		<![CDATA[
+
+		var echo = project.createTask("echo");
+			var text = attributes.get("text");
+
+			echo.setMessage("input text : " + text );
+			echo.perform( );
+
+			var replacetext = text.trim().replace("origin", "");
+
+			replacetext = replacetext.replaceAll("^\"|\"$", "");
+			replacetext =  replacetext.substring(1, replacetext.length());
+
+			echo.setMessage("3-replace text: " + replacetext );
+			echo.perform( );
+			project.setProperty(attributes.get("property"), replacetext);
+		]]>
+		</scriptdef>
+
+		<scriptdef name="getfilelength" language="javascript">
+			<attribute name="inputtext" />
+			<attribute name="property" />
+			<![CDATA[
+	
+				var echo = project.createTask("echo");
+				var text = attributes.get("inputtext");
+				var inputStringLength=-1;
+	
+				echo.setMessage("input text : " + text );
+				echo.perform( );
+
+				if (text=='${supportedMetadataList}'){
+					inputStringLength = 0;
+				}
+				else if (text.trim().length>0){
+					inputStringLength=text.trim().length;
+				}
+				else{
+					inputStringLength = 0;
+				}
+
+				echo.setMessage("final input text length is : " + inputStringLength );
+				echo.perform( );
+				project.setProperty(attributes.get("property"), inputStringLength);
+			]]>
+			</scriptdef>
+
+		<scriptdef name="getmetadatafromjson" language="javascript">
+				<attribute name="inputjosntext" />
+				<attribute name="property" />
+				<![CDATA[
+		
+					var echo = project.createTask("echo");
+					var inputjosntext = attributes.get("inputjosntext");
+					var inputStringLength=-1;
+					var metadataString='';
+
+					var metaDataJson = JSON.parse(inputjosntext);
+
+					var metadataObjects =  metaDataJson["result"].metadataObjects;
+					for (key in metadataObjects) {
+						var metaDataName =metadataObjects[key]["xmlName"];
+						metadataString = metadataString + metaDataName + ",";
+					}
+					project.setProperty(attributes.get("property"), metadataString);
+				]]>
+			</scriptdef>
+</project>

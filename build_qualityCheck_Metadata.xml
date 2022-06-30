@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ################################################################################################### 
+ @author   Persistent Systems 
+ @date     3-28-2017
+ @description  - This file contain all the tasks/targets needed for the supported salesforce metadata 
+				 migration to the target org. It has the logic to get the salesforce session id of the
+				 target org, response parsing, builddetails object record creation, runquery, incremental
+				 deployment, full deployment etc.
+				 
+				 Any metadata related changes needed need to be carried out in this file.
+				  
+#########################################################################################################
+-->
+
+<project name="Tasks for Code Quality" basedir="." xmlns:sf="antlib:com.salesforce">
+    
+	    <!-- <property file="../build.properties"/> -->
+   <!-- <property file="default.properties"/> -->
+    <!-- <property  file="${property.file.path}"/> -->
+	<property environment="env"/>
+    
+  
+    <!-- Define salesforce migration tool task  -->
+    <taskdef resource="com/salesforce/antlib.xml" uri="antlib:com.salesforce">
+        <classpath>
+            <pathelement location="CISupport/lib/ant-salesforce.jar" />
+        </classpath>
+    </taskdef>
+
+	<taskdef resource="net/sf/antcontrib/antlib.xml" 
+              classpath="CISupport/lib/ant-contrib-1.0b3.jar"/>
+    
+    <!-- Define ant contib task to have complex logic like if else and for loop etc. -->
+    <taskdef resource="net/sf/antcontrib/antlib.xml" 
+              classpath="${ant.contrib.jar}" />
+	
+    <path id="Encodebase64.path">
+        <pathelement location="${ant.java.commons-codec.jar}"/>
+        <pathelement location="${ant.git.salesforce.incremental.jar}"/>
+    </path>
+    <!-- Define ant http task to make http get and post to salesforce for data -->  
+	<taskdef name="http" 
+             classname="org.missinglink.ant.task.http.HttpClientTask" classpath="${ant.http.jar}"/> 
+    
+    <!-- Define xmltask to parse xml and add node to xml etc. -->
+    <taskdef name="xmltask" 
+             classname="com.oopsconsultancy.xmltask.ant.XmlTask" classpath="${ant.xmltask.jar}"/>
+    
+    <!-- Define custom EncodeBase64 task to convert zip back up to base64 so that it can be post to SF -->
+    <taskdef name="EncodeBased64" classpathref="Encodebase64.path"
+             classname="EncodeBased64Binary"  />
+
+	<!-- Define custom cleanpermission task for cleaning profiles/permissionsets not included in the src -->
+	    <taskdef name="cleanPermissions" 
+	             classname="PreparePermissions" classpath="${ant.git.salesforce.incremental.jar}" />
+
+	<!-- identify duplicate code -->
+	<property name="pmd.dir" value="D:\AssessorService\pmd-bin-6.2.0\lib\" /><!-- directory that contains pmd.jar -->
+	<path id="pmd.lib" >
+		<fileset dir="${pmd.dir}">
+			<include name="*.jar"/>
+			<exclude name="/rulesets" />
+		</fileset>
+	</path>
+	<taskdef name="cpd" classname="net.sourceforge.pmd.cpd.CPDTask" classpathref="pmd.lib" />
+
+	<taskdef name="pmd" classname="net.sourceforge.pmd.ant.PMDTask" classpathref="pmd.lib"/>
+
+	<target name="PMD_Check">
+		<!-- 1. PMD Scan -->
+		<PMD_Check/>
+	</target>
+		
+	<target name="QualityCheck">
+		<echo>QualityCheck_Type is ${QualityCheck_Type}</echo>
+		<runJWTAuth/>
+		
+		<switch value="${QualityCheck_Type}">
+			<case value="All">
+			  <echo message="The value of property is All" />
+			  	<!-- 1. PMD Scan -->
+				<PMD_Check/>
+
+				<!-- 2. PMD CPD Scan -->
+				<PMD_CPD_Check/>
+
+				<!-- 2. Code Coverage -->
+				<runApexTests/>
+
+				<!-- 3. ESLINT -->
+				<runESlint/>
+
+				<runLIMITCheck/>
+
+
+			</case>
+			<case value="PMD_Check">
+				<echo message="The value of property is PMD_Check" />
+					<!-- 1. PMD Scan -->
+					<PMD_Check/>
+			</case>
+			<case value="PMD_CPD_Check">
+				<echo message="The value of property is PMD_CPD_Check" />
+				<!-- 2. PMD CPD Scan -->
+				<PMD_CPD_Check/>
+			</case>
+			<case value="PMD_Stress_Check">
+				<echo message="The value of property is PMD_Stress_Check" />
+			</case>
+			<case value="Apex_Coverage_Check">
+				<echo message="The value of property is Apex_Coverage_Check" />
+				<!-- 2. Code Coverage -->
+				<runApexTests/>
+			</case>
+			<case value="ESLint_Check">
+				<echo message="The value of property is ESLint_Check" />
+				<runESlint/>
+			</case>
+			<default>
+				<echo message="The value of property is All" />
+			</default>
+		  </switch>
+	
+	</target>
+
+
+		<!-- SFDX Authorization  -->
+	<macrodef name="runJWTAuth" description="Authorizes a Salesforce org using the JWT flow">
+		<sequential>
+			<echo>******************* JWT Authentication Started ******************************</echo>
+			<!-- JWTAuth.bat for windows and  JWTAuth.sh Linux 	-->
+				<exec executable="JWTAuth.bat" resultproperty="SFDX.auth.Result" outputproperty="SFDX.auth.ResultResponse" failonerror="true"></exec>
+
+			<!-- <exec executable="cmd" resultproperty="SFDX.auth.Result" outputproperty="SFDX.auth.ResultResponse" failonerror="true">
+					<arg line="/c" />
+					<arg line=" sfdx force:auth:jwt:grant -u ${sfsb.username} -f ${jwtKeyFile} -i ${clientId} -r ${sfsb.instanceurl} - -json - -loglevel TRACE "/>
+				</exec> -->
+			
+				
+			<echo>Auth Result : ${SFDX.auth.Result}</echo> 
+			<echo>Auth Result Response</echo>
+			<echo>${SFDX.auth.ResultResponse}</echo>
+			<if>
+				<equals arg1="${SFDX.auth.Result}" arg2="0"/>
+				<then>
+					<echo>Authorization :Success</echo>
+				</then>
+				<else>
+					<echo>Authorization :Fail</echo>
+				</else>
+			</if>
+			<echo>******************* JWT Authentication Ended ******************************</echo>
+		</sequential>
+	</macrodef>
+
+	<macrodef name="PMD_Check" description="Analyze the code using PMD Ruleset and generate the result in html page">
+		<sequential>
+			<echo>******************* PMD Check Started ******************************</echo>
+			 <!-- <exec executable="cmd"
+					resultproperty="SFDX.CodeAnalyzer.Result"  outputproperty="SFDX.CodeAnalyzer.output" 
+					failonerror="false">
+				<arg line="/c "></arg>	
+				<arg line="pmd.bat -d force-app/main/default -f summaryhtml -R QualityCheck/PMDRuleSet/ruleset.xml" />
+			</exec> -->
+				
+			<!-- <exec executable="PMDCodeAnalyzer.bat" resultproperty="SFDX.CodeAnalyzer.Result" 
+				outputproperty="SFDX.CodeAnalyzer.output" failonerror="false"> 
+			</exec> -->
+			<pmd shortFilenames="true">
+				<ruleset>QualityCheck/PMDRuleSet/ruleset.xml</ruleset>
+				<formatter type="html" toFile="deploy-sf/PMDResult.html" toConsole="true"/>
+				<fileset dir="force-app/main/default">
+					<include name="**/*.cls"/>
+					<include name="**/*.CLS"/>
+					<include name="**/*.trigger"/>
+				</fileset>
+			</pmd>
+			<if>
+				<available file="deploy-sf/PMDResult.html"/>
+				<then>
+					<!-- <loadfile property="contents" srcFile="PMDResult.html" />
+					<echo message="${contents}" /> -->
+					<echo>Result is available at file deploy-sf/PMDResult.html </echo>
+				</then>
+				<else>
+				</else>
+			</if>
+			<echo>******************* PMD Check Ended ******************************</echo>
+		</sequential>
+	</macrodef>
+
+	<macrodef name="PMD_CPD_Check" description="Analyze the code for Copy paste issues ">
+		<sequential>
+			<echo>******************* PMD CPD Check Started ******************************</echo>
+			<echo>Executing PMD CPD scan for Apex Code base at ${git.src}</echo>
+			<cpd minimumTokenCount="75" language="apex"  outputFile="deploy-sf/cpd.txt">
+				<fileset dir="${git.src}">
+					<include name="**/*.cls"/>
+					<include name="**/*.CLS"/>
+					<include name="**/*.trigger"/>
+					<include name="**/*.TRIGGER"/>
+				</fileset>
+			</cpd>
+			<loadfile property="cpdResponse" srcFile="deploy-sf/cpd.txt"/>
+			<echo>CPD Scan Response</echo>
+			<echo>${cpdResponse}</echo>
+			<echo>******************* PMD CPD Check Ended ******************************</echo>
+		</sequential>
+	</macrodef>
+
+	<macrodef name="runApexTests" description="Run the Apex test class and generate the result in json">
+		<sequential>
+			<echo>******************* Run Apex Local Tests Started ******************************</echo>
+
+			<exec executable="cmd"
+			resultproperty="SFDX.config.Result" 
+			outputproperty="SFDX.config.output" 
+			failonerror="false">
+				<arg line="/c "></arg>
+				<!-- below command is use to set improvedCodeCoverage to true -->
+				<arg line=" sfdx force:config:set SFDX_IMPROVED_CODE_COVERAGE=true" />
+			</exec>
+			<echo>SFDX config Response</echo>
+			<echo>${SFDX.config.output}</echo>
+
+			<exec executable="cmd"
+			resultproperty="SFDX.apexTest.Result" 
+			outputproperty="SFDX.apexTest.output" 
+			failonerror="false">
+				<arg line="/c "></arg>
+				<!-- below command is use to get the test result in json format
+					sfdx force:apex:test:run -y -l RunLocalTests -c -r json -d deploy-sf  -->
+				<arg line=" sfdx force:apex:test:run -l RunLocalTests -c -y -r json -u ${sfsb.username} --verbose" />
+			</exec>
+			<echo>Apex Test Response</echo>
+			<echo>${SFDX.apexTest.output}</echo>
+			<echo>******************* Run Apex Local Tests Ended ******************************</echo>
+		</sequential>
+	</macrodef>
+
+	<macrodef name="runLIMITCheck" description="Run the All LIMIT command  and generate the result in json">
+		<sequential>
+			<echo>******************* Run Check for All LIMIT Started ******************************</echo>
+
+			<exec executable="cmd"
+			resultproperty="SFDX.limit.Result" 
+			outputproperty="SFDX.limit.output" 
+			failonerror="false">
+				<arg line="/c "></arg>
+				<!-- below command is use to get the test result in json format
+					sfdx force:apex:test:run -y -l RunLocalTests -c -r json -d deploy-sf  -->
+				<arg line=" sfdx force:limits:api:display -u ${sfsb.username} --json" />
+			</exec>
+			<echo>limit Response</echo>
+			<echo>${SFDX.limit.output}</echo>
+			<echo>******************* Run Check for All LIMIT Ended ******************************</echo>
+		</sequential>
+	</macrodef>
+
+	<macrodef name="runESlint" description="Run the ESLINT for Javascipt test class and generate the result in json">
+		<sequential>
+			<echo>******************* Run ESLint Tests Started ******************************</echo>
+
+			
+			<echo>******************* Run ESLINT Tests Ended ******************************</echo>
+		</sequential>
+	</macrodef>
+</project>
